@@ -20,8 +20,9 @@ let memLogs = []
 if (MONGO_URI) {
   const client = new MongoClient(MONGO_URI)
   client.connect().then(() => {
-    db = client.db()
-    console.log('[db] connected')
+    const dbName = getDbNameFromUri(MONGO_URI)
+    db = client.db(dbName)
+    console.log('[db] connected', dbName ? `db=${dbName}` : '')
   }).catch((e) => console.error('[db] connect error', e.message))
 }
 
@@ -88,6 +89,11 @@ app.post('/api/route', async (req, res) => {
       waypoints: { origin: a, destination: b },
     })
   } catch (e) {
+    if (e.response && e.response.data) {
+      const status = e.response.status || 500
+      console.error('[route] error', status, JSON.stringify(e.response.data))
+      return res.status(status).json({ error: 'ors_error', details: e.response.data })
+    }
     console.error('[route] error', e.message)
     return res.status(500).json({ error: e.message })
   }
@@ -103,6 +109,16 @@ function toLL(x) {
     return { lat: +b, lng: +a }
   }
   throw new Error('invalid coordinate: ' + JSON.stringify(x))
+}
+
+function getDbNameFromUri(uri) {
+  try {
+    const u = new URL(uri)
+    const name = (u.pathname || '').replace(/^\//, '')
+    return name || undefined
+  } catch {
+    return undefined
+  }
 }
 
 app.listen(PORT, () => console.log(`[api] listening on :${PORT}`))
