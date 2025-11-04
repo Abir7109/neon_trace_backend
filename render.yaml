@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: neon-trace-api
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: ORS_API_KEY
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: NODE_VERSION
+        value: 20
