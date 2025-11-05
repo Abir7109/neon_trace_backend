@@ -18,6 +18,7 @@ const MONGO_URI = process.env.MONGODB_URI
 let db = null
 let memLogs = []
 let memDevices = new Map()
+let memLocs = []
 
 if (MONGO_URI) {
   const client = new MongoClient(MONGO_URI)
@@ -71,11 +72,15 @@ app.post('/api/me', async (req, res) => {
     const doc = ll ? { ...base, lastLocation: ll } : base
     if (db) {
       await db.collection('devices').updateOne({ deviceId }, { $set: doc, $setOnInsert: { createdAt: new Date() } }, { upsert: true })
+      if (ll) {
+        await db.collection('device_locations').insertOne({ deviceId, lat: ll.lat, lng: ll.lng, ip, createdAt: new Date() })
+      }
       const saved = await db.collection('devices').findOne({ deviceId })
       return res.json({ me: saved })
     } else {
       const existing = memDevices.get(deviceId)
       memDevices.set(deviceId, existing ? { ...existing, ...doc } : { ...doc, createdAt: new Date() })
+      if (ll) memLocs.push({ deviceId, lat: ll.lat, lng: ll.lng, ip, createdAt: new Date() })
       return res.json({ me: memDevices.get(deviceId) })
     }
   } catch (e) {
