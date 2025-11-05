@@ -14,11 +14,13 @@ app.set('trust proxy', true)
 const PORT = process.env.PORT || 3001
 const ORS_KEY = process.env.ORS_API_KEY
 const MONGO_URI = process.env.MONGODB_URI
+const FCM_KEY = process.env.FCM_SERVER_KEY || process.env.FCM_KEY || null
 
 let db = null
 let memLogs = []
 let memDevices = new Map()
 let memLocs = []
+let memTokens = new Map() // token -> { deviceId, platform, createdAt, updatedAt }
 
 if (MONGO_URI) {
   const client = new MongoClient(MONGO_URI)
@@ -105,18 +107,60 @@ app.post('/api/admin/block', async (req, res) => {
   }
 })
 
+// Admin: push register token
+app.post('/api/push/register', async (req, res) => {
+  try {
+    const { deviceId, token, platform = 'android' } = req.body || {}
+    if (!deviceId || !token) return res.status(400).json({ error: 'deviceId and token required' })
+    const doc = { deviceId: String(deviceId), token: String(token), platform: String(platform), updatedAt: new Date() }
+    if (db) {
+      await db.collection('push_tokens').updateOne({ token: doc.token }, { $set: doc, $setOnInsert: { createdAt: new Date() } }, { upsert: true })
+    } else {
+      const prev = memTokens.get(doc.token)
+      memTokens.set(doc.token, prev ? { ...prev, ...doc } : { ...doc, createdAt: new Date() })
+    }
+    return res.json({ ok: true })
+  } catch (e) { return res.status(500).json({ error: e.message }) }
+})
+
+// Admin: push broadcast
+app.post('/api/push/broadcast', async (req, res) => {
+  try {
+    if (!FCM_KEY) return res.status(500).json({ error: 'server_missing_fcm_key' })
+    const { title, body, data } = req.body || {}
+    const payloadBase = { notification: { title: String(title||'Neon Trace'), body: String(body||'') }, data: data && typeof data === 'object' ? data : undefined }
+    let tokens = []
+    if (db) {
+      tokens = (await db.collection('push_tokens').find({}).project({ token:1, _id:0 }).toArray()).map((x)=>x.token)
+    } else {
+      tokens = Array.from(memTokens.keys())
+    }
+    let sent = 0, failed = 0
+    for (let i=0; i<tokens.length; i+=900) {
+      const batch = tokens.slice(i, i+900)
+      const resp = await axios.post('https://fcm.googleapis.com/fcm/send', { ...payloadBase, registration_ids: batch }, { headers: { 'Content-Type': 'application/json', Authorization: `key=${FCM_KEY}` }, timeout: 20000 }).catch((e)=>({ data: { failure: batch.length, success: 0, error: e.message } }))
+      const r = resp.data || {}
+      sent += Number(r.success||0); failed += Number(r.failure||0)
+    }
+    return res.json({ ok: true, sent, failed, total: tokens.length })
+  } catch (e) {
+    return res.status(500).json({ error: e.message })
+  }
+})
+
 // Admin: quick stats
 app.get('/api/stats', async (req, res) => {
   try {
     if (db) {
-      const [devices, locations, logs] = await Promise.all([
+      const [devices, locations, logs, tokens] = await Promise.all([
         db.collection('devices').countDocuments({}),
         db.collection('device_locations').countDocuments({}),
         db.collection('route_logs').countDocuments({}),
+        db.collection('push_tokens').countDocuments({}),
       ])
-      return res.json({ counts: { devices, locations, logs } })
+      return res.json({ counts: { devices, locations, logs, tokens } })
     } else {
-      return res.json({ counts: { devices: memDevices.size, locations: memLocs.length, logs: memLogs.length } })
+      return res.json({ counts: { devices: memDevices.size, locations: memLocs.length, logs: memLogs.length, tokens: memTokens.size } })
     }
   } catch (e) {
     return res.status(500).json({ error: e.message })
