@@ -64,9 +64,11 @@ app.post('/api/me', async (req, res) => {
   try {
     const { deviceId, deviceName, location } = req.body || {}
     if (!deviceId) return res.status(400).json({ error: 'deviceId required' })
-    const ll = toLL(location)
+    let ll = null
+    try { if (location != null) ll = toLL(location) } catch {}
     const ip = getIp(req)
-    const doc = { deviceId, deviceName: (deviceName || '').toString().slice(0, 100), ip, lastLocation: ll, updatedAt: new Date() }
+    const base = { deviceId, deviceName: (deviceName || '').toString().slice(0, 100), ip, updatedAt: new Date() }
+    const doc = ll ? { ...base, lastLocation: ll } : base
     if (db) {
       await db.collection('devices').updateOne({ deviceId }, { $set: doc, $setOnInsert: { createdAt: new Date() } }, { upsert: true })
       const saved = await db.collection('devices').findOne({ deviceId })
