@@ -9,6 +9,7 @@ dotenv.config()
 const app = express()
 app.use(cors())
 app.use(express.json())
+app.set('trust proxy', true)
 
 const PORT = process.env.PORT || 3001
 const ORS_KEY = process.env.ORS_API_KEY
@@ -16,6 +17,7 @@ const MONGO_URI = process.env.MONGODB_URI
 
 let db = null
 let memLogs = []
+let memDevices = new Map()
 
 if (MONGO_URI) {
   const client = new MongoClient(MONGO_URI)
@@ -35,6 +37,44 @@ app.get('/api/logs', async (req, res) => {
       return res.json({ logs })
     } else {
       return res.json({ logs: memLogs.slice(-50).reverse() })
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message })
+  }
+})
+
+// Get or upsert a device profile
+app.get('/api/me', async (req, res) => {
+  try {
+    const deviceId = (req.query.deviceId || '').toString().trim()
+    if (!deviceId) return res.status(400).json({ error: 'deviceId required' })
+    if (db) {
+      const doc = await db.collection('devices').findOne({ deviceId })
+      return res.json({ me: doc || null })
+    } else {
+      const doc = memDevices.get(deviceId) || null
+      return res.json({ me: doc })
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/me', async (req, res) => {
+  try {
+    const { deviceId, deviceName, location } = req.body || {}
+    if (!deviceId) return res.status(400).json({ error: 'deviceId required' })
+    const ll = toLL(location)
+    const ip = getIp(req)
+    const doc = { deviceId, deviceName: (deviceName || '').toString().slice(0, 100), ip, lastLocation: ll, updatedAt: new Date() }
+    if (db) {
+      await db.collection('devices').updateOne({ deviceId }, { $set: doc, $setOnInsert: { createdAt: new Date() } }, { upsert: true })
+      const saved = await db.collection('devices').findOne({ deviceId })
+      return res.json({ me: saved })
+    } else {
+      const existing = memDevices.get(deviceId)
+      memDevices.set(deviceId, existing ? { ...existing, ...doc } : { ...doc, createdAt: new Date() })
+      return res.json({ me: memDevices.get(deviceId) })
     }
   } catch (e) {
     return res.status(500).json({ error: e.message })
@@ -113,15 +153,21 @@ app.post('/api/route', async (req, res) => {
 })
 
 function toLL(x) {
-  if (x && typeof x.lat === 'number' && typeof x.lng === 'number') return x
+  if (x && typeof x.lat === 'number' && typeof x.lng === 'number') return { lat: +x.lat, lng: +x.lng }
   if (Array.isArray(x) && x.length >= 2) {
-    // accept [lat, lng] or [lng, lat] if explicitly marked
+    // accept [lat, lng] or [lng, lat]
     const [a, b] = x
-    // Heuristic: lat is between -90..90
-    if (Math.abs(a) <= 90 && Math.abs(b) <= 180) return { lat: +a, lng: +b }
-    return { lat: +b, lng: +a }
+    if (isFinite(a) && isFinite(b) && Math.abs(a) <= 90 && Math.abs(b) <= 180) return { lat: +a, lng: +b }
+    if (isFinite(a) && isFinite(b)) return { lat: +b, lng: +a }
   }
   throw new Error('invalid coordinate: ' + JSON.stringify(x))
+}
+
+function getIp(req) {
+  const xfwd = req.headers['x-forwarded-for']
+  if (typeof xfwd === 'string') return xfwd.split(',')[0].trim()
+  if (Array.isArray(xfwd) && xfwd.length) return xfwd[0].split(',')[0].trim()
+  return (req.ip || req.connection?.remoteAddress || '').toString()
 }
 
 function getDbNameFromUri(uri) {
