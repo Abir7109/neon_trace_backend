@@ -51,14 +51,27 @@ app.post('/api/route', async (req, res) => {
 
     const t0 = Date.now()
     const url = `https://api.openrouteservice.org/v2/directions/${encodeURIComponent(profile)}/geojson`
-    const body = {
+    const baseBody = {
       coordinates: [ [a.lng, a.lat], [b.lng, b.lat] ],
       instructions: false,
-      options: { alternative_routes: { target_count: 3, share_factor: 0.6 } },
+    }
+    let body = { ...baseBody, options: { alternative_routes: { target_count: 3, share_factor: 0.6 } } }
+
+    let data
+    try {
+      const resp = await axios.post(url, body, { headers: { Authorization: ORS_KEY, 'Content-Type': 'application/json' }, timeout: 20000 })
+      data = resp.data
+    } catch (e) {
+      // Fallback: retry without alternatives if ORS rejects options (400)
+      if (e.response && e.response.status === 400) {
+        const resp2 = await axios.post(url, baseBody, { headers: { Authorization: ORS_KEY, 'Content-Type': 'application/json' }, timeout: 20000 })
+        data = resp2.data
+      } else {
+        throw e
+      }
     }
 
-    const resp = await axios.post(url, body, { headers: { Authorization: ORS_KEY, 'Content-Type': 'application/json' }, timeout: 20000 })
-    const features = resp.data && resp.data.features ? resp.data.features : []
+    const features = data && data.features ? data.features : []
     if (!features.length) throw new Error('No route returned')
 
     // Pick shortest
