@@ -44,6 +44,85 @@ app.get('/api/logs', async (req, res) => {
   }
 })
 
+// Admin: list devices
+app.get('/api/devices', async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(1000, parseInt(req.query.limit||'200')))
+    if (db) {
+      const rows = await db.collection('devices').find({}).sort({ updatedAt: -1 }).limit(limit).toArray()
+      return res.json({ devices: rows })
+    } else {
+      const arr = Array.from(memDevices.values()).sort((a,b)=> (b.updatedAt?.getTime?.()||0)-(a.updatedAt?.getTime?.()||0)).slice(0, limit)
+      return res.json({ devices: arr })
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message })
+  }
+})
+
+// Admin: list device locations (recent)
+app.get('/api/device_locations', async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(5000, parseInt(req.query.limit||'500')))
+    const deviceId = (req.query.deviceId||'').trim()
+    const since = req.query.since ? new Date(req.query.since) : null
+    if (db) {
+      const q = {}
+      if (deviceId) q.deviceId = deviceId
+      if (since && !isNaN(+since)) q.createdAt = { $gte: since }
+      const rows = await db.collection('device_locations').find(q).sort({ createdAt: -1 }).limit(limit).toArray()
+      return res.json({ locations: rows })
+    } else {
+      let arr = memLocs.slice()
+      if (deviceId) arr = arr.filter((x)=>x.deviceId===deviceId)
+      if (since && !isNaN(+since)) arr = arr.filter((x)=> x.createdAt >= since)
+      arr.sort((a,b)=> b.createdAt - a.createdAt)
+      return res.json({ locations: arr.slice(0, limit) })
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message })
+  }
+})
+
+// Admin: block/unblock device
+app.post('/api/admin/block', async (req, res) => {
+  try {
+    const { deviceId, blocked } = req.body||{}
+    if (!deviceId) return res.status(400).json({ error: 'deviceId required' })
+    const set = { blocked: !!blocked, updatedAt: new Date() }
+    if (db) {
+      await db.collection('devices').updateOne({ deviceId }, { $set: set })
+      const saved = await db.collection('devices').findOne({ deviceId })
+      return res.json({ me: saved })
+    } else {
+      const ex = memDevices.get(deviceId) || { deviceId }
+      const next = { ...ex, ...set }
+      memDevices.set(deviceId, next)
+      return res.json({ me: next })
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message })
+  }
+})
+
+// Admin: quick stats
+app.get('/api/stats', async (req, res) => {
+  try {
+    if (db) {
+      const [devices, locations, logs] = await Promise.all([
+        db.collection('devices').countDocuments({}),
+        db.collection('device_locations').countDocuments({}),
+        db.collection('route_logs').countDocuments({}),
+      ])
+      return res.json({ counts: { devices, locations, logs } })
+    } else {
+      return res.json({ counts: { devices: memDevices.size, locations: memLocs.length, logs: memLogs.length } })
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message })
+  }
+})
+
 // Get or upsert a device profile
 app.get('/api/me', async (req, res) => {
   try {
