@@ -3,6 +3,7 @@ import cors from 'cors'
 import dotenv from 'dotenv'
 import axios from 'axios'
 import { MongoClient } from 'mongodb'
+import crypto from 'crypto'
 
 dotenv.config()
 
@@ -126,7 +127,6 @@ app.post('/api/push/register', async (req, res) => {
 // Admin: push broadcast
 app.post('/api/push/broadcast', async (req, res) => {
   try {
-    if (!FCM_KEY) return res.status(500).json({ error: 'server_missing_fcm_key' })
     const { title, body, data } = req.body || {}
     const payloadBase = { notification: { title: String(title||'Neon Trace'), body: String(body||'') }, data: data && typeof data === 'object' ? data : undefined }
     let tokens = []
@@ -136,12 +136,36 @@ app.post('/api/push/broadcast', async (req, res) => {
       tokens = Array.from(memTokens.keys())
     }
     let sent = 0, failed = 0
-    for (let i=0; i<tokens.length; i+=900) {
-      const batch = tokens.slice(i, i+900)
-      const resp = await axios.post('https://fcm.googleapis.com/fcm/send', { ...payloadBase, registration_ids: batch }, { headers: { 'Content-Type': 'application/json', Authorization: `key=${FCM_KEY}` }, timeout: 20000 }).catch((e)=>({ data: { failure: batch.length, success: 0, error: e.message } }))
-      const r = resp.data || {}
-      sent += Number(r.success||0); failed += Number(r.failure||0)
+
+    const saJson = process.env.FCM_SERVICE_ACCOUNT
+    const projectId = process.env.FCM_PROJECT_ID || (()=>{ try { return JSON.parse(saJson||'{}').project_id } catch { return null } })()
+
+    if (saJson && projectId) {
+      // Use FCM HTTP v1 with OAuth2
+      const bearer = await getFcmAccessToken()
+      const url = `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/messages:send`
+      // send with small concurrency
+      const maxC = 10
+      let inflight = []
+      for (const t of tokens) {
+        const p = axios.post(url, { message: { token: t, ...payloadBase } }, { headers: { Authorization: `Bearer ${bearer}`, 'Content-Type':'application/json' }, timeout: 20000 })
+          .then(()=>{ sent += 1 }).catch(()=>{ failed += 1 })
+        inflight.push(p)
+        if (inflight.length >= maxC) { await Promise.all(inflight); inflight = [] }
+      }
+      if (inflight.length) await Promise.all(inflight)
+    } else if (FCM_KEY) {
+      // Fallback to legacy if configured
+      for (let i=0; i<tokens.length; i+=900) {
+        const batch = tokens.slice(i, i+900)
+        const resp = await axios.post('https://fcm.googleapis.com/fcm/send', { ...payloadBase, registration_ids: batch }, { headers: { 'Content-Type': 'application/json', Authorization: `key=${FCM_KEY}` }, timeout: 20000 }).catch((e)=>({ data: { failure: batch.length, success: 0, error: e.message } }))
+        const r = resp.data || {}
+        sent += Number(r.success||0); failed += Number(r.failure||0)
+      }
+    } else {
+      return res.status(500).json({ error: 'server_missing_fcm_credentials' })
     }
+
     return res.json({ ok: true, sent, failed, total: tokens.length })
   } catch (e) {
     return res.status(500).json({ error: e.message })
@@ -308,6 +332,32 @@ function getDbNameFromUri(uri) {
   } catch {
     return undefined
   }
+}
+
+// ===== FCM v1 auth helper =====
+let _fcmAuth = { token: null, exp: 0 }
+function b64url(buf) { return Buffer.from(buf).toString('base64').replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_') }
+async function getFcmAccessToken() {
+  const saStr = process.env.FCM_SERVICE_ACCOUNT
+  if (!saStr) throw new Error('missing_service_account')
+  let sa
+  try { sa = JSON.parse(saStr) } catch { throw new Error('invalid_service_account_json') }
+  const now = Math.floor(Date.now()/1000)
+  if (_fcmAuth.token && (_fcmAuth.exp - 60*5) > (now*1000)) return _fcmAuth.token
+  const header = b64url(JSON.stringify({ alg:'RS256', typ:'JWT' }))
+  const payload = b64url(JSON.stringify({ iss: sa.client_email, scope: 'https://www.googleapis.com/auth/firebase.messaging', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 }))
+  const toSign = `${header}.${payload}`
+  const sign = crypto.createSign('RSA-SHA256')
+  sign.update(toSign)
+  sign.end()
+  const sig = b64url(sign.sign(sa.private_key))
+  const assertion = `${toSign}.${sig}`
+  const form = new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion })
+  const resp = await axios.post('https://oauth2.googleapis.com/token', form.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 })
+  const { access_token, expires_in } = resp.data || {}
+  if (!access_token) throw new Error('token_exchange_failed')
+  _fcmAuth = { token: access_token, exp: Date.now() + ((expires_in||3600)*1000) }
+  return access_token
 }
 
 app.listen(PORT, () => console.log(`[api] listening on :${PORT}`))
